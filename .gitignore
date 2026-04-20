@@ -1,0 +1,9 @@
+*.exe
+*.out
+*.test
+coverage.out
+coverage.html
+vendor/
+.idea/
+.vscode/
+*.log
