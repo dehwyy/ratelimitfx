@@ -59,6 +59,18 @@ limiter := ratelimit.NewRedisLimiter[uuid.UUID](
 allowed, err := limiter.Allow(ctx, merchantID)
 ```
 
+## Dynamic per-request limits
+
+Use `AllowN` when the effective cap depends on runtime state — for example a per-tenant
+configuration loaded from cache. The Strategy's `Limit()` is ignored.
+
+```go
+cfg, _ := configCache.Get(ctx, merchantID) // cfg.RPM varies per merchant
+allowed, err := limiter.AllowN(ctx, merchantID, cfg.RPM)
+```
+
+The Strategy still provides the Redis key namespace and name — only the cap changes per call.
+
 ## Custom strategy
 
 ```go

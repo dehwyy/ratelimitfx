@@ -13,8 +13,11 @@ import (
 var memberSeq uint64
 
 // Limiter checks whether a request identified by K is allowed within the configured window.
+// Allow uses the Strategy.Limit() static cap; AllowN takes a per-request limit for cases
+// where the effective cap depends on runtime state (e.g. a per-tenant config loaded from cache).
 type Limiter[K any] interface {
 	Allow(ctx context.Context, k K) (bool, error)
+	AllowN(ctx context.Context, k K, limit int32) (bool, error)
 }
 
 // RedisLimiter is a Redis sliding-window implementation of Limiter.
@@ -39,13 +42,32 @@ func NewRedisLimiter[K any](
 	}
 }
 
-// Allow reports whether k is below the configured limit within the current sliding window.
+// Allow reports whether k is below the strategy's static limit within the current sliding window.
 // On Redis error the decision follows Config.FailMode.
 func (l *RedisLimiter[K]) Allow(
 	ctx context.Context,
 	k K,
 ) (bool, error) {
-	limit := l.strategy.Limit()
+	return l.allow(ctx, k, l.strategy.Limit())
+}
+
+// AllowN reports whether k is below the given per-request limit within the current sliding window.
+// The Strategy's Limit() is ignored. Use this when the effective cap depends on runtime state
+// the Strategy cannot express (e.g. per-tenant config loaded from cache each request).
+// On Redis error the decision follows Config.FailMode.
+func (l *RedisLimiter[K]) AllowN(
+	ctx context.Context,
+	k K,
+	limit int32,
+) (bool, error) {
+	return l.allow(ctx, k, limit)
+}
+
+func (l *RedisLimiter[K]) allow(
+	ctx context.Context,
+	k K,
+	limit int32,
+) (bool, error) {
 	if limit <= 0 {
 		return true, nil
 	}

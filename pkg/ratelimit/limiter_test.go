@@ -204,3 +204,44 @@ func TestRedisLimiter_ZeroLimitAllowsAll(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, allowed)
 }
+
+func TestRedisLimiter_AllowNOverridesStrategyLimit(t *testing.T) {
+	_, client := newTestClient(t)
+
+	limiter := NewRedisLimiter[uuid.UUID](
+		client,
+		PerMerchantStrategy{
+			MaxRequests: 1000,
+		},
+		Config{},
+	)
+
+	ctx := context.Background()
+	id := uuid.New()
+
+	for i := 0; i < 3; i++ {
+		allowed, err := limiter.AllowN(ctx, id, 3)
+		require.NoError(t, err)
+		require.True(t, allowed, "request %d must be allowed under per-request limit of 3", i+1)
+	}
+
+	allowed, err := limiter.AllowN(ctx, id, 3)
+	require.NoError(t, err)
+	require.False(t, allowed, "4th request must be denied despite strategy allowing 1000")
+}
+
+func TestRedisLimiter_AllowNZeroLimitAllowsAll(t *testing.T) {
+	_, client := newTestClient(t)
+
+	limiter := NewRedisLimiter[string](
+		client,
+		PerIPStrategy{
+			MaxRequests: 60,
+		},
+		Config{},
+	)
+
+	allowed, err := limiter.AllowN(context.Background(), "1.2.3.4", 0)
+	require.NoError(t, err)
+	require.True(t, allowed)
+}
