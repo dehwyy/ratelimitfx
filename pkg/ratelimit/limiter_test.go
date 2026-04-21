@@ -31,7 +31,7 @@ func TestRedisLimiter_AllowsUpToLimit(t *testing.T) {
 	limiter := NewRedisLimiter[uuid.UUID](
 		client,
 		PerMerchantStrategy{
-			MaxRequests: 3,
+			RPM: 3,
 		},
 		Config{},
 	)
@@ -56,7 +56,7 @@ func TestRedisLimiter_SlidingWindowReleasesAfterWindow(t *testing.T) {
 	limiter := NewRedisLimiter[uuid.UUID](
 		client,
 		PerMerchantStrategy{
-			MaxRequests: 2,
+			RPM: 2,
 		},
 		Config{
 			Window: time.Second,
@@ -89,14 +89,14 @@ func TestRedisLimiter_KeysAreStrategyScoped(t *testing.T) {
 	merchantLimiter := NewRedisLimiter[uuid.UUID](
 		client,
 		PerMerchantStrategy{
-			MaxRequests: 1,
+			RPM: 1,
 		},
 		Config{},
 	)
-	ipLimiter := NewRedisLimiter[string](
+	ipLimiter := NewRedisLimiter[IP](
 		client,
 		PerIPStrategy{
-			MaxRequests: 1,
+			RPM: 1,
 		},
 		Config{},
 	)
@@ -108,7 +108,7 @@ func TestRedisLimiter_KeysAreStrategyScoped(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, allowed)
 
-	allowed, err = ipLimiter.Allow(ctx, id.String())
+	allowed, err = ipLimiter.Allow(ctx, IP(id.String()))
 	require.NoError(t, err)
 	require.True(t, allowed, "IP strategy uses a different key namespace than merchant strategy")
 
@@ -130,10 +130,10 @@ func TestRedisLimiter_KeysAreStrategyScoped(t *testing.T) {
 func TestRedisLimiter_CustomKeyPrefix(t *testing.T) {
 	mr, client := newTestClient(t)
 
-	limiter := NewRedisLimiter[string](
+	limiter := NewRedisLimiter[IP](
 		client,
 		PerIPStrategy{
-			MaxRequests: 1,
+			RPM: 1,
 		},
 		Config{
 			KeyPrefix: "widgetapi_rl",
@@ -150,10 +150,10 @@ func TestRedisLimiter_CustomKeyPrefix(t *testing.T) {
 func TestRedisLimiter_FailClosedOnRedisError(t *testing.T) {
 	mr, client := newTestClient(t)
 
-	limiter := NewRedisLimiter[string](
+	limiter := NewRedisLimiter[IP](
 		client,
 		PerIPStrategy{
-			MaxRequests: 10,
+			RPM: 10,
 		},
 		Config{
 			FailMode: FailClosed,
@@ -171,10 +171,10 @@ func TestRedisLimiter_FailClosedOnRedisError(t *testing.T) {
 func TestRedisLimiter_FailOpenOnRedisError(t *testing.T) {
 	mr, client := newTestClient(t)
 
-	limiter := NewRedisLimiter[string](
+	limiter := NewRedisLimiter[IP](
 		client,
 		PerIPStrategy{
-			MaxRequests: 10,
+			RPM: 10,
 		},
 		Config{
 			FailMode: FailOpen,
@@ -192,10 +192,10 @@ func TestRedisLimiter_FailOpenOnRedisError(t *testing.T) {
 func TestRedisLimiter_ZeroLimitAllowsAll(t *testing.T) {
 	_, client := newTestClient(t)
 
-	limiter := NewRedisLimiter[string](
+	limiter := NewRedisLimiter[IP](
 		client,
 		PerIPStrategy{
-			MaxRequests: -1,
+			RPM: -1,
 		},
 		Config{},
 	)
@@ -211,7 +211,7 @@ func TestRedisLimiter_AllowNOverridesStrategyLimit(t *testing.T) {
 	limiter := NewRedisLimiter[uuid.UUID](
 		client,
 		PerMerchantStrategy{
-			MaxRequests: 1000,
+			RPM: 1000,
 		},
 		Config{},
 	)
@@ -233,10 +233,10 @@ func TestRedisLimiter_AllowNOverridesStrategyLimit(t *testing.T) {
 func TestRedisLimiter_AllowNZeroLimitAllowsAll(t *testing.T) {
 	_, client := newTestClient(t)
 
-	limiter := NewRedisLimiter[string](
+	limiter := NewRedisLimiter[IP](
 		client,
 		PerIPStrategy{
-			MaxRequests: 60,
+			RPM: 60,
 		},
 		Config{},
 	)

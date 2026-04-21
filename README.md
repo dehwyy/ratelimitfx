@@ -25,15 +25,16 @@ import (
 )
 
 client := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
-limiter := ratelimit.NewRedisLimiter[string](
+limiter := ratelimit.NewRedisLimiter[ratelimit.IP](
     client,
-    ratelimit.PerIPStrategy{MaxRequests: 60},
+    ratelimit.PerIPStrategy{RPM: 60},
     ratelimit.Config{FailMode: ratelimit.FailClosed},
 )
 
 mw := func(next http.Handler) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        allowed, err := limiter.Allow(r.Context(), ratelimit.ClientIP(r))
+        ip := ratelimit.IP(ratelimit.ClientIP(r))
+        allowed, err := limiter.Allow(r.Context(), ip)
         if err != nil || !allowed {
             http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
             return
@@ -52,7 +53,7 @@ import "github.com/google/uuid"
 
 limiter := ratelimit.NewRedisLimiter[uuid.UUID](
     client,
-    ratelimit.PerMerchantStrategy{MaxRequests: 120},
+    ratelimit.PerMerchantStrategy{RPM: 120},
     ratelimit.Config{},
 )
 
@@ -74,21 +75,23 @@ The Strategy still provides the Redis key namespace and name — only the cap ch
 ## Custom strategy
 
 ```go
-type PerAPIKeyStrategy struct{ Max int32 }
+type PerAPIKeyStrategy struct{ Max ratelimit.RPM }
 
-func (s PerAPIKeyStrategy) Name() string             { return "apikey" }
-func (s PerAPIKeyStrategy) Key(k string) string      { return k }
-func (s PerAPIKeyStrategy) Limit() int32             { return s.Max }
+func (s PerAPIKeyStrategy) Name() string        { return "apikey" }
+func (s PerAPIKeyStrategy) Key(k string) string { return k }
+func (s PerAPIKeyStrategy) Limit() ratelimit.RPM { return s.Max }
 ```
 
 ## Config defaults
 
-| Field         | Default                                    |
-|---------------|--------------------------------------------|
-| `Window`      | `1m`                                       |
-| `MaxRequests` | from `Strategy.Limit()` (120 merchant / 60 IP) |
-| `FailMode`    | `FailClosed`                               |
-| `KeyPrefix`   | `ratelimitfx`                              |
+| Field       | Default                                         |
+|-------------|-------------------------------------------------|
+| `Window`    | `1m`                                            |
+| `FailMode`  | `FailClosed`                                    |
+| `KeyPrefix` | `ratelimitfx`                                   |
+
+The static cap comes from `Strategy.Limit()` (defaults: 120 for merchant, 60 for IP — both interpreted per `Window`).
+`RPM` is named for the default minute window; if you override `Window`, the value becomes requests-per-window.
 
 Redis keys are `<KeyPrefix>:<Strategy.Name()>:<Strategy.Key(k)>`, e.g.
 `ratelimitfx:merchant:550e8400-e29b-41d4-a716-446655440000`.

@@ -13,43 +13,43 @@ import (
 type Strategy[K any] interface {
 	Name() string
 	Key(k K) string
-	Limit() int32
+	Limit() RPM
 }
 
 // PerMerchantStrategy keys by merchant UUID. Default cap 120 rpm.
 type PerMerchantStrategy struct {
-	MaxRequests int32
+	RPM RPM
 }
 
-const DefaultPerMerchantLimit int32 = 120
+const DefaultPerMerchantLimit RPM = 120
 
 func (s PerMerchantStrategy) Name() string { return "merchant" }
 
 func (s PerMerchantStrategy) Key(id uuid.UUID) string { return id.String() }
 
-func (s PerMerchantStrategy) Limit() int32 {
-	if s.MaxRequests <= 0 {
+func (s PerMerchantStrategy) Limit() RPM {
+	if s.RPM <= 0 {
 		return DefaultPerMerchantLimit
 	}
-	return s.MaxRequests
+	return s.RPM
 }
 
 // PerIPStrategy keys by client IP string. Default cap 60 rpm.
 type PerIPStrategy struct {
-	MaxRequests int32
+	RPM RPM
 }
 
-const DefaultPerIPLimit int32 = 60
+const DefaultPerIPLimit RPM = 60
 
 func (s PerIPStrategy) Name() string { return "ip" }
 
-func (s PerIPStrategy) Key(ip string) string { return ip }
+func (s PerIPStrategy) Key(ip IP) string { return ip.String() }
 
-func (s PerIPStrategy) Limit() int32 {
-	if s.MaxRequests <= 0 {
+func (s PerIPStrategy) Limit() RPM {
+	if s.RPM <= 0 {
 		return DefaultPerIPLimit
 	}
-	return s.MaxRequests
+	return s.RPM
 }
 
 // ClientIP extracts a client IP from an HTTP request.

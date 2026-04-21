@@ -48,7 +48,7 @@ func (l *RedisLimiter[K]) Allow(
 	ctx context.Context,
 	k K,
 ) (bool, error) {
-	return l.allow(ctx, k, l.strategy.Limit())
+	return l.allow(ctx, k, l.strategy.Limit().RPM())
 }
 
 // AllowN reports whether k is below the given per-request limit within the current sliding window.

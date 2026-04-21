@@ -25,10 +25,10 @@ func main() {
 	)
 	defer client.Close()
 
-	limiter := ratelimit.NewRedisLimiter[string](
+	limiter := ratelimit.NewRedisLimiter(
 		client,
 		ratelimit.PerIPStrategy{
-			MaxRequests: 10,
+			RPM: 10,
 		},
 		ratelimit.Config{
 			FailMode: ratelimit.FailClosed,
@@ -46,11 +46,11 @@ func main() {
 }
 
 func rateLimitMiddleware(
-	limiter ratelimit.Limiter[string],
+	limiter ratelimit.Limiter[ratelimit.IP],
 ) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := ratelimit.ClientIP(r)
+			ip := ratelimit.IP(ratelimit.ClientIP(r))
 			allowed, err := limiter.Allow(r.Context(), ip)
 			if err != nil {
 				http.Error(

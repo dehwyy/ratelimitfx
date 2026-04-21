@@ -10,13 +10,13 @@ import (
 
 func TestPerMerchantStrategy_DefaultLimit(t *testing.T) {
 	require.Equal(t, DefaultPerMerchantLimit, PerMerchantStrategy{}.Limit())
-	require.Equal(t, int32(500), PerMerchantStrategy{MaxRequests: 500}.Limit())
+	require.Equal(t, RPM(500), PerMerchantStrategy{RPM: 500}.Limit())
 	require.Equal(t, "merchant", PerMerchantStrategy{}.Name())
 }
 
 func TestPerIPStrategy_DefaultLimit(t *testing.T) {
 	require.Equal(t, DefaultPerIPLimit, PerIPStrategy{}.Limit())
-	require.Equal(t, int32(200), PerIPStrategy{MaxRequests: 200}.Limit())
+	require.Equal(t, RPM(200), PerIPStrategy{RPM: 200}.Limit())
 	require.Equal(t, "ip", PerIPStrategy{}.Name())
 }
 
