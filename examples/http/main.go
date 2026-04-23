@@ -13,6 +13,10 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+type ipKey string
+
+func (k ipKey) String() string { return string(k) }
+
 func main() {
 	addr := os.Getenv("REDIS_ADDR")
 	if addr == "" {
@@ -27,7 +31,7 @@ func main() {
 
 	limiter := ratelimit.NewRedisLimiter(
 		client,
-		ratelimit.PerIPStrategy{
+		ratelimit.PerKeyStrategy{
 			RPM: 10,
 		},
 		ratelimit.Config{
@@ -46,11 +50,11 @@ func main() {
 }
 
 func rateLimitMiddleware(
-	limiter ratelimit.Limiter[ratelimit.IP],
+	limiter ratelimit.Limiter,
 ) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := ratelimit.IP(ratelimit.ClientIP(r))
+			ip := ipKey(ratelimit.ClientIP(r))
 			allowed, err := limiter.Allow(r.Context(), ip)
 			if err != nil {
 				http.Error(

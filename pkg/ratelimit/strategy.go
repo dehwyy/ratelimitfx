@@ -1,59 +1,38 @@
 package ratelimit
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
-
-	"github.com/google/uuid"
 )
 
 // Strategy maps a caller-identity value K to a Redis key fragment and a request cap.
 // Name is used in the Redis key prefix to prevent collisions between strategies.
-type Strategy[K any] interface {
+type Strategy interface {
 	Name() string
-	Key(k K) string
+	Key(k fmt.Stringer) string
 	Limit() RPM
 }
 
-// PerMerchantStrategy keys by merchant UUID. Default cap 120 rpm.
-type PerMerchantStrategy struct {
+// PerKeyStrategy keys by merchant UUID. Default cap 120 rpm.
+type PerKeyStrategy struct {
 	RPM RPM
 }
 
-const DefaultPerMerchantLimit RPM = 120
+const DefaultPerKeyLimit RPM = 120
 
-func (s PerMerchantStrategy) Name() string { return "merchant" }
+func (s PerKeyStrategy) Name() string { return "key-strategy" }
 
-func (s PerMerchantStrategy) Key(id uuid.UUID) string { return id.String() }
+func (s PerKeyStrategy) Key(key fmt.Stringer) string { return key.String() }
 
-func (s PerMerchantStrategy) Limit() RPM {
+func (s PerKeyStrategy) Limit() RPM {
 	if s.RPM <= 0 {
-		return DefaultPerMerchantLimit
+		return DefaultPerKeyLimit
 	}
 	return s.RPM
 }
 
-// PerIPStrategy keys by client IP string. Default cap 60 rpm.
-type PerIPStrategy struct {
-	RPM RPM
-}
-
-const DefaultPerIPLimit RPM = 60
-
-func (s PerIPStrategy) Name() string { return "ip" }
-
-func (s PerIPStrategy) Key(ip IP) string { return ip.String() }
-
-func (s PerIPStrategy) Limit() RPM {
-	if s.RPM <= 0 {
-		return DefaultPerIPLimit
-	}
-	return s.RPM
-}
-
-// ClientIP extracts a client IP from an HTTP request.
-// Preference: first entry of X-Forwarded-For, else X-Real-IP, else RemoteAddr host.
 func ClientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		parts := strings.Split(xff, ",")
