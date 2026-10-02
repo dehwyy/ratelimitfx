@@ -28,10 +28,13 @@ go get github.com/dehwyy/ratelimitfx@latest
 | `Key` | type alias | `= fmt.Stringer` — the caller-identity value |
 | `RPM` | microtype | `int32` with `.RPM() int32` |
 | `Config` | struct | `Window`, `MaxRequests`, `FailMode`, `KeyPrefix`, `CountRejected` |
-| `ClientIP(r *http.Request) string` | func | extracts client IP from `X-Forwarded-For` / `X-Real-IP` / `RemoteAddr` |
+| `ClientIP(r, trusted ...netip.Prefix) string` | func | client IP; `X-Forwarded-For` / `X-Real-IP` are honoured only when `RemoteAddr` is a trusted proxy |
+| `ParseTrustedProxies([]string) ([]netip.Prefix, error)` | func | parses CIDRs and bare IPs |
+| `StringKey` | microtype | `string` implementing `fmt.Stringer`, ready to use as a `Key` |
+| `Module[C](func(*C) Config)` | fx option | provides `*RedisLimiter` and `Limiter` |
 
 There is no `IP` type, no `PerIPStrategy`, and no `PerMerchantStrategy`. Identity values are passed as
-any `fmt.Stringer`; if you want to key by IP, wrap the `ClientIP` string in your own `fmt.Stringer`.
+any `fmt.Stringer`; if you want to key by IP, wrap the `ClientIP` string in `StringKey`.
 
 ## Quick start — HTTP middleware
 
@@ -43,10 +46,6 @@ import (
     "github.com/redis/go-redis/v9"
 )
 
-type ipKey string
-
-func (k ipKey) String() string { return string(k) }
-
 client := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
 limiter := ratelimit.NewRedisLimiter(
     client,
@@ -56,7 +55,7 @@ limiter := ratelimit.NewRedisLimiter(
 
 mw := func(next http.Handler) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        allowed, err := limiter.Allow(r.Context(), ipKey(ratelimit.ClientIP(r)))
+        allowed, err := limiter.Allow(r.Context(), ratelimit.StringKey(ratelimit.ClientIP(r, trusted...)))
         if err != nil || !allowed {
             http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
             return
@@ -67,6 +66,33 @@ mw := func(next http.Handler) http.Handler {
 ```
 
 Full example at [`examples/http`](./examples/http).
+
+## Client IP and trusted proxies
+
+`ClientIP` never trusts forwarding headers from an arbitrary peer. With no trusted proxies it returns
+the host of `RemoteAddr` and ignores `X-Forwarded-For` and `X-Real-IP`, so a client cannot choose its
+own rate-limit key by spoofing a header.
+
+```go
+trusted, err := ratelimit.ParseTrustedProxies([]string{"10.0.0.0/8", "127.0.0.1"})
+ip := ratelimit.ClientIP(r, trusted...)
+```
+
+When `RemoteAddr` is inside a trusted prefix, the `X-Forwarded-For` chain is walked from the right and
+the first address that is not a trusted proxy is the client. Entries a client prepends on the left are
+never reached. An unparsable entry stops the walk at the last valid hop. `X-Real-IP` is used only when
+there is no `X-Forwarded-For` and the peer is trusted.
+
+## fx module
+
+```go
+ratelimit.Module(func(cfg *config.Config) ratelimit.Config {
+    return ratelimit.Config{KeyPrefix: cfg.RateLimitPrefix}
+})
+```
+
+The graph must contain a `*redis.Client` or `redis.Cmdable`; a `ratelimit.Strategy` is optional
+(default `PerKeyStrategy{}`). The module provides `*RedisLimiter` and `Limiter`.
 
 ## Dynamic per-request limits
 
