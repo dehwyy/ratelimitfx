@@ -2,20 +2,19 @@
 //
 // Run: go run ./examples/http
 // Requires a Redis instance at localhost:6379 (override via REDIS_ADDR).
+// Set TRUSTED_PROXIES (comma-separated CIDRs/IPs) to honour X-Forwarded-For from your ingress.
 package main
 
 import (
-	"fmt"
+	"log"
 	"net/http"
+	"net/netip"
 	"os"
+	"strings"
 
 	"github.com/dehwyy/ratelimitfx/pkg/ratelimit"
 	"github.com/redis/go-redis/v9"
 )
-
-type ipKey string
-
-func (k ipKey) String() string { return string(k) }
 
 func main() {
 	addr := os.Getenv("REDIS_ADDR")
@@ -39,22 +38,30 @@ func main() {
 		},
 	)
 
+	trusted, err := ratelimit.ParseTrustedProxies(strings.Split(os.Getenv("TRUSTED_PROXIES"), ","))
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = fmt.Fprintln(w, "hello")
+		if _, err := w.Write([]byte("hello\n")); err != nil {
+			log.Print(err)
+		}
 	})
 
-	handler := rateLimitMiddleware(limiter)(mux)
+	handler := rateLimitMiddleware(limiter, trusted)(mux)
 
-	_ = http.ListenAndServe(":8080", handler)
+	log.Fatal(http.ListenAndServe(":8080", handler))
 }
 
 func rateLimitMiddleware(
 	limiter ratelimit.Limiter,
+	trusted []netip.Prefix,
 ) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := ipKey(ratelimit.ClientIP(r))
+			ip := ratelimit.StringKey(ratelimit.ClientIP(r, trusted...))
 			allowed, err := limiter.Allow(r.Context(), ip)
 			if err != nil {
 				http.Error(
