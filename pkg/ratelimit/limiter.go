@@ -12,6 +12,27 @@ import (
 
 var memberSeq uint64
 
+var slidingWindowScript = redis.NewScript(`
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+local member = ARGV[4]
+local ttl = tonumber(ARGV[5])
+local countRejected = ARGV[6] == '1'
+
+redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
+local allowed = redis.call('ZCARD', key) < limit
+if allowed or countRejected then
+	redis.call('ZADD', key, now, member)
+end
+redis.call('PEXPIRE', key, ttl)
+if allowed then
+	return 1
+end
+return 0
+`)
+
 // Limiter checks whether a request identified by K is allowed within the configured window.
 // Allow uses the Strategy.Limit() static cap; AllowN takes a per-request limit for cases
 // where the effective cap depends on runtime state (e.g. a per-tenant config loaded from cache).
@@ -25,6 +46,7 @@ type RedisLimiter struct {
 	client   redis.Cmdable
 	strategy Strategy
 	cfg      Config
+	now      func() time.Time
 }
 
 var _ Limiter = (*RedisLimiter)(nil)
@@ -39,6 +61,7 @@ func NewRedisLimiter(
 		client:   client,
 		strategy: strategy,
 		cfg:      cfg.withDefaults(),
+		now:      time.Now,
 	}
 }
 
@@ -79,51 +102,43 @@ func (l *RedisLimiter) allow(
 		l.strategy.Key(k),
 	)
 
-	now := time.Now()
-	windowStart := now.Add(-l.cfg.Window).UnixMilli()
+	now := l.now()
 	member := fmt.Sprintf(
 		"%d-%d",
 		now.UnixNano(),
 		atomic.AddUint64(&memberSeq, 1),
 	)
-	ttl := l.cfg.Window * 2
 
-	pipe := l.client.Pipeline()
-	pipe.ZRemRangeByScore(
-		ctx,
-		key,
-		"0",
-		fmt.Sprintf("%d", windowStart),
-	)
-	pipe.ZAdd(
-		ctx,
-		key,
-		redis.Z{
-			Score:  float64(now.UnixMilli()),
-			Member: member,
-		},
-	)
-	countCmd := pipe.ZCard(ctx, key)
-	pipe.Expire(
-		ctx,
-		key,
-		ttl,
-	)
+	countRejected := 0
+	if l.cfg.CountRejected {
+		countRejected = 1
+	}
 
-	if _, err := pipe.Exec(ctx); err != nil {
+	result, err := slidingWindowScript.Run(
+		ctx,
+		l.client,
+		[]string{key},
+		now.UnixMilli(),
+		l.cfg.Window.Milliseconds(),
+		limit,
+		member,
+		(l.cfg.Window * 2).Milliseconds(),
+		countRejected,
+	).Int64()
+	if err != nil {
 		log.Error().
 			Err(err).
 			Str("ratelimit_strategy", l.strategy.Name()).
 			Str("ratelimit_key", key).
 			Str("ratelimit_fail_mode", failModeString(l.cfg.FailMode)).
-			Msg("ratelimitfx: redis pipeline failed")
+			Msg("ratelimitfx: redis script failed")
 		if l.cfg.FailMode == FailOpen {
 			return true, nil
 		}
-		return false, fmt.Errorf("ratelimitfx: redis pipeline: %w", err)
+		return false, fmt.Errorf("ratelimitfx: redis script: %w", err)
 	}
 
-	return countCmd.Val() <= int64(limit), nil
+	return result == 1, nil
 }
 
 func failModeString(m FailMode) string {

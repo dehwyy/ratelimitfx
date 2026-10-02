@@ -22,6 +22,9 @@ type Config struct {
 	FailMode FailMode
 	// KeyPrefix is prepended to every Redis key. Default "ratelimitfx".
 	KeyPrefix string
+	// CountRejected makes rejected requests count towards the window, so a client that keeps
+	// hammering stays blocked. Default false: only allowed requests are recorded.
+	CountRejected bool
 }
 
 const (

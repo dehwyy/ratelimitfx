@@ -2,7 +2,7 @@
 
 Redis-backed sliding-window rate limiter with a pluggable strategy.
 
-- Sliding window via Redis sorted sets (ZADD + ZREMRANGEBYSCORE + ZCARD in a single pipeline).
+- Sliding window via Redis sorted sets, evaluated atomically by a single Lua script (one round trip, no races between concurrent callers).
 - `Limiter` interface — small, mock-friendly, strategy-scoped Redis keys.
 - Built-in `PerKeyStrategy` keyed by any `fmt.Stringer` — bring your own strategy via the `Strategy` interface.
 - `FailMode` — `FailClosed` (default, deny on Redis error) or `FailOpen` (allow).
@@ -27,7 +27,7 @@ go get github.com/dehwyy/ratelimitfx@latest
 | `PerKeyStrategy` | struct | the only built-in strategy; default cap `120` |
 | `Key` | type alias | `= fmt.Stringer` — the caller-identity value |
 | `RPM` | microtype | `int32` with `.RPM() int32` |
-| `Config` | struct | `Window`, `MaxRequests`, `FailMode`, `KeyPrefix` |
+| `Config` | struct | `Window`, `MaxRequests`, `FailMode`, `KeyPrefix`, `CountRejected` |
 | `ClientIP(r *http.Request) string` | func | extracts client IP from `X-Forwarded-For` / `X-Real-IP` / `RemoteAddr` |
 
 There is no `IP` type, no `PerIPStrategy`, and no `PerMerchantStrategy`. Identity values are passed as
@@ -96,6 +96,7 @@ func (s apiKeyStrategy) Limit() ratelimit.RPM          { return s.max }
 | `Window`    | `1m`           |
 | `FailMode`  | `FailClosed`   |
 | `KeyPrefix` | `ratelimitfx`  |
+| `CountRejected` | `false` (only allowed requests count) |
 
 The static cap comes from `Strategy.Limit()` (`PerKeyStrategy` default is `120`).
 `RPM` is named for the default minute window; if you override `Window`, the value becomes
@@ -104,9 +105,29 @@ requests-per-window. A cap of `<= 0` disables limiting and short-circuits withou
 Redis keys are `<KeyPrefix>:<Strategy.Name()>:<Strategy.Key(k)>`, e.g.
 `ratelimitfx:key-strategy:550e8400-e29b-41d4-a716-446655440000`.
 
+## Counting rejected requests
+
+By default (`CountRejected: false`) only allowed requests are recorded in the window. A client that
+keeps sending requests while blocked does not extend its own block: it is let through again as soon
+as its earlier allowed requests leave the window.
+
+With `CountRejected: true` rejected requests are recorded too, so a client that keeps hammering stays
+blocked until it stops for a full window (the behaviour of v0.3.0 and earlier).
+
+```go
+limiter := ratelimit.NewRedisLimiter(
+    client,
+    ratelimit.PerKeyStrategy{RPM: 60},
+    ratelimit.Config{CountRejected: true},
+)
+```
+
+See [CHANGELOG](./CHANGELOG.md) for the upgrade note.
+
 ## Fail-mode semantics
 
-`FailClosed` (default) logs the Redis error at `Error` level and returns `(false, err)` — the caller
+The decision is a single atomic Lua script (`EVALSHA`, falling back to `EVAL`), so it requires a Redis
+that supports scripting. `FailClosed` (default) logs the Redis error at `Error` level and returns `(false, err)` — the caller
 denies the request and surfaces the error. `FailOpen` logs the error and returns `(true, nil)` — the
 caller lets the request through.
 
@@ -123,7 +144,7 @@ They run an in-process `golang.org/x/time/rate` token bucket per merchant (see e
 ## Testing
 
 Tests use [miniredis](https://github.com/alicebob/miniredis) — no Docker required. When a test relies
-on time passing, use `mr.FastForward(duration)` rather than real sleeps.
+on window expiry, drive the limiter's internal clock rather than sleeping.
 
 ```bash
 go test ./...

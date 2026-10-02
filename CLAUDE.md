@@ -47,21 +47,23 @@ Redis key format is fixed: `<KeyPrefix>:<Strategy.Name()>:<Strategy.Key(k)>`. Ch
 
 ### Sliding window implementation
 
-Single Redis pipeline per `Allow`/`AllowN` call (limiter.go `allow`):
+Single atomic Lua script per `Allow`/`AllowN` call (limiter.go `slidingWindowScript`, run via `redis.Script`):
 1. `ZREMRANGEBYSCORE key 0 <now - window>` — drop expired entries.
-2. `ZADD key <nowMs> <nowNs-seq>` — record this hit with a unique member.
-3. `ZCARD key` — count surviving entries.
-4. `EXPIRE key <2*window>` — TTL safety net.
+2. `ZCARD key` — `allowed = count < limit`.
+3. `ZADD key <nowMs> <member>` — only if allowed, or if `Config.CountRejected` is true.
+4. `PEXPIRE key <2*window>` — TTL safety net.
+
+`Config.CountRejected` (default false): rejected requests are not recorded, so a hammering client is not blocked forever. `true` restores the pre-v0.3.1 behaviour. The clock is `RedisLimiter.now` (defaults to `time.Now`, overridable in package tests).
 
 The member format `<nanoUnix>-<atomic-seq>` (package-level `memberSeq`) guarantees uniqueness even when multiple goroutines hit the same nanosecond — required because ZADD dedupes by member.
 
-Decision: `count <= limit` → allow. Equal-to-limit still allows because this request was already added.
-
 ### Fail modes
 
-`Config.FailMode` (config.go) determines pipeline-error behavior in `allow`:
+`Config.FailMode` (config.go) determines script-error behavior in `allow`:
 - `FailClosed` (default): log at Error level, return `(false, err)` — caller denies and surfaces error.
 - `FailOpen`: log at Error level, return `(true, nil)` — caller lets request through.
+
+Script errors (including pipeline/connection errors) follow `FailMode`.
 
 Short-circuit: `limit <= 0` returns `(true, nil)` without touching Redis. This is how callers disable limiting via config without special-casing it upstream.
 
@@ -75,7 +77,7 @@ Short-circuit: `limit <= 0` returns `(true, nil)` without touching Redis. This i
 
 ### Tests
 
-Everything uses `miniredis.RunT(t)` — no Docker. When adding tests that rely on time passing, use `mr.FastForward(duration)` rather than real `time.Sleep`; the sliding window keys off wall clock via `time.Now()` in `allow`, and miniredis advances its clock with FastForward.
+Everything uses `miniredis.RunT(t)` — no Docker. When adding tests that rely on window expiry, set `limiter.now` to a fake clock instead of sleeping; `mr.FastForward` only moves key TTLs, not the window scores.
 
 ## How Paylonium consumes this library
 

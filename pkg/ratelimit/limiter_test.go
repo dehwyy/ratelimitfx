@@ -3,6 +3,8 @@ package ratelimit
 import (
 	"context"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -251,4 +253,219 @@ func TestRedisLimiter_AllowNZeroLimitAllowsAll(t *testing.T) {
 	allowed, err := limiter.AllowN(context.Background(), testKey("1.2.3.4"), 0)
 	require.NoError(t, err)
 	require.True(t, allowed)
+}
+
+func windowCount(t *testing.T, mr *miniredis.Miniredis, key string) int {
+	t.Helper()
+	members, err := mr.ZMembers(key)
+	if err != nil {
+		return 0
+	}
+	return len(members)
+}
+
+func TestRedisLimiter_CountsAllowedRequests(t *testing.T) {
+	mr, client := newTestClient(t)
+
+	limiter := NewRedisLimiter(
+		client,
+		PerKeyStrategy{
+			RPM: 3,
+		},
+		Config{},
+	)
+
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		allowed, err := limiter.Allow(ctx, testKey("a"))
+		require.NoError(t, err)
+		require.True(t, allowed)
+	}
+
+	require.Equal(t, 3, windowCount(t, mr, "ratelimitfx:key-strategy:a"))
+}
+
+func TestRedisLimiter_RejectedNotCountedByDefault(t *testing.T) {
+	mr, client := newTestClient(t)
+
+	limiter := NewRedisLimiter(
+		client,
+		PerKeyStrategy{
+			RPM: 2,
+		},
+		Config{},
+	)
+
+	ctx := context.Background()
+	for i := 0; i < 2; i++ {
+		allowed, err := limiter.Allow(ctx, testKey("a"))
+		require.NoError(t, err)
+		require.True(t, allowed)
+	}
+	for i := 0; i < 5; i++ {
+		allowed, err := limiter.Allow(ctx, testKey("a"))
+		require.NoError(t, err)
+		require.False(t, allowed)
+	}
+
+	require.Equal(t, 2, windowCount(t, mr, "ratelimitfx:key-strategy:a"))
+}
+
+func TestRedisLimiter_RejectedCountedWhenEnabled(t *testing.T) {
+	mr, client := newTestClient(t)
+
+	limiter := NewRedisLimiter(
+		client,
+		PerKeyStrategy{
+			RPM: 2,
+		},
+		Config{
+			CountRejected: true,
+		},
+	)
+
+	ctx := context.Background()
+	for i := 0; i < 2; i++ {
+		allowed, err := limiter.Allow(ctx, testKey("a"))
+		require.NoError(t, err)
+		require.True(t, allowed)
+	}
+	for i := 0; i < 5; i++ {
+		allowed, err := limiter.Allow(ctx, testKey("a"))
+		require.NoError(t, err)
+		require.False(t, allowed)
+	}
+
+	require.Equal(t, 7, windowCount(t, mr, "ratelimitfx:key-strategy:a"))
+}
+
+func TestRedisLimiter_HammeringClientRecoversWhenRejectedNotCounted(t *testing.T) {
+	_, client := newTestClient(t)
+
+	limiter := NewRedisLimiter(
+		client,
+		PerKeyStrategy{
+			RPM: 1,
+		},
+		Config{
+			Window: time.Minute,
+		},
+	)
+	clock := time.Now()
+	limiter.now = func() time.Time { return clock }
+
+	ctx := context.Background()
+	allowed, err := limiter.Allow(ctx, testKey("a"))
+	require.NoError(t, err)
+	require.True(t, allowed)
+
+	for i := 0; i < 10; i++ {
+		clock = clock.Add(5 * time.Second)
+		allowed, err = limiter.Allow(ctx, testKey("a"))
+		require.NoError(t, err)
+		require.False(t, allowed)
+	}
+
+	clock = clock.Add(11 * time.Second)
+	allowed, err = limiter.Allow(ctx, testKey("a"))
+	require.NoError(t, err)
+	require.True(t, allowed, "first allowed request has left the window, hammering must not extend the block")
+}
+
+func TestRedisLimiter_HammeringClientStaysBlockedWhenRejectedCounted(t *testing.T) {
+	_, client := newTestClient(t)
+
+	limiter := NewRedisLimiter(
+		client,
+		PerKeyStrategy{
+			RPM: 1,
+		},
+		Config{
+			Window:        time.Minute,
+			CountRejected: true,
+		},
+	)
+	clock := time.Now()
+	limiter.now = func() time.Time { return clock }
+
+	ctx := context.Background()
+	allowed, err := limiter.Allow(ctx, testKey("a"))
+	require.NoError(t, err)
+	require.True(t, allowed)
+
+	for i := 0; i < 10; i++ {
+		clock = clock.Add(5 * time.Second)
+		allowed, err = limiter.Allow(ctx, testKey("a"))
+		require.NoError(t, err)
+		require.False(t, allowed)
+	}
+
+	clock = clock.Add(11 * time.Second)
+	allowed, err = limiter.Allow(ctx, testKey("a"))
+	require.NoError(t, err)
+	require.False(t, allowed, "rejected requests keep the window full")
+}
+
+func TestRedisLimiter_WindowExpiryDropsOldEntries(t *testing.T) {
+	mr, client := newTestClient(t)
+
+	limiter := NewRedisLimiter(
+		client,
+		PerKeyStrategy{
+			RPM: 2,
+		},
+		Config{
+			Window: time.Minute,
+		},
+	)
+	clock := time.Now()
+	limiter.now = func() time.Time { return clock }
+
+	ctx := context.Background()
+	for i := 0; i < 2; i++ {
+		allowed, err := limiter.Allow(ctx, testKey("a"))
+		require.NoError(t, err)
+		require.True(t, allowed)
+		clock = clock.Add(20 * time.Second)
+	}
+
+	allowed, err := limiter.Allow(ctx, testKey("a"))
+	require.NoError(t, err)
+	require.False(t, allowed)
+
+	clock = clock.Add(25 * time.Second)
+	allowed, err = limiter.Allow(ctx, testKey("a"))
+	require.NoError(t, err)
+	require.True(t, allowed, "oldest entry left the window")
+
+	require.Equal(t, 2, windowCount(t, mr, "ratelimitfx:key-strategy:a"))
+}
+
+func TestRedisLimiter_ConcurrentAllowIsAtomic(t *testing.T) {
+	_, client := newTestClient(t)
+
+	limiter := NewRedisLimiter(
+		client,
+		PerKeyStrategy{
+			RPM: 10,
+		},
+		Config{},
+	)
+
+	ctx := context.Background()
+	var allowedCount atomic.Int64
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			allowed, err := limiter.Allow(ctx, testKey("a"))
+			if err == nil && allowed {
+				allowedCount.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	require.EqualValues(t, 10, allowedCount.Load())
 }
