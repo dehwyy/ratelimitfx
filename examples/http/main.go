@@ -2,7 +2,6 @@
 //
 // Run: go run ./examples/http
 // Requires a Redis instance at localhost:6379 (override via REDIS_ADDR).
-// Set TRUSTED_PROXIES (comma-separated CIDRs/IPs) to honour X-Forwarded-For from your ingress.
 package main
 
 import (

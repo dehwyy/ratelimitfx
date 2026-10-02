@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `github.com/dehwyy/ratelimitfx` — standalone Go library: a Redis-backed sliding-window rate limiter with one pluggable strategy. Single-module repo, not part of the `paylonium` Go workspace despite its location.
 
-There is no fx wiring in this library and no `module.go`. Consuming services hand-roll their own `fx.Provide` around `NewRedisLimiter` and a strategy.
+`module.go` offers `Module[C](func(*C) Config)`: provides `*RedisLimiter` and `Limiter` from a `*redis.Client` or `redis.Cmdable` in the graph and an optional `Strategy` (default `PerKeyStrategy{}`).
 
 ## Commands
 
@@ -39,7 +39,7 @@ All production code lives under `pkg/ratelimit/`. The design is intentionally sm
 - `Key(k fmt.Stringer) string` — how to serialise the caller identity.
 - `Limit() RPM` — default static cap (requests per window, not per second — `Window` default is `1m`).
 
-The only built-in strategy is `PerKeyStrategy` (`Name()` returns `"key-strategy"`, default cap `DefaultPerKeyLimit = 120`). There is no `PerIPStrategy` or `PerMerchantStrategy`. To key by IP, wrap the `ClientIP(r)` string in your own `fmt.Stringer` (see `examples/http` `ipKey`).
+The only built-in strategy is `PerKeyStrategy` (`Name()` returns `"key-strategy"`, default cap `DefaultPerKeyLimit = 120`). There is no `PerIPStrategy` or `PerMerchantStrategy`. To key by IP, wrap the `ClientIP(r, trusted...)` string in `StringKey` (see `examples/http`).
 
 `RedisLimiter` (limiter.go) is the only `Limiter` implementation, built via `NewRedisLimiter(client, strategy, cfg)`.
 
@@ -73,7 +73,7 @@ Short-circuit: `limit <= 0` returns `(true, nil)` without touching Redis. This i
 - `RPM int32` with `.RPM() int32` accessor (used by `Strategy.Limit`).
 - `Key` — a type alias for `fmt.Stringer`, the caller-identity value.
 
-`ClientIP(r *http.Request) string` (strategy.go) extracts the client IP from `X-Forwarded-For`, then `X-Real-IP`, then `RemoteAddr`. It returns a plain `string`; callers wrap it in their own `fmt.Stringer` before passing it as a `Key`.
+`ClientIP(r, trusted ...netip.Prefix) string` (client_ip.go) returns the `RemoteAddr` host unless that peer is in `trusted`; only then is `X-Forwarded-For` (walked right to left, first non-trusted hop) or `X-Real-IP` honoured. Never reintroduce trust of `X-Forwarded-For[0]`. `ParseTrustedProxies` builds the prefixes. It returns a plain `string`; wrap it in `StringKey` before passing it as a `Key`.
 
 ### Tests
 

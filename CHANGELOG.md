@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.4.0
+
+### Security
+
+- `ClientIP` no longer trusts `X-Forwarded-For[0]` / `X-Real-IP` from any peer. Forwarding headers are
+  honoured only when `RemoteAddr` belongs to a trusted proxy; the XFF chain is walked right to left
+  and the first non-trusted hop is the client. Previously a client could rotate the header value and
+  bypass the limit.
+
+### Changed (behaviour)
+
+- `ClientIP(r)` with no trusted proxies now returns the `RemoteAddr` host. Services behind an ingress
+  must pass their proxy CIDRs, otherwise all clients share the ingress address:
+  `ClientIP(r, trusted...)`. The signature is source-compatible (variadic).
+
+### Added
+
+- `ParseTrustedProxies([]string) ([]netip.Prefix, error)`.
+- `StringKey` microtype.
+- `Module[C](func(*C) Config)` fx option providing `*RedisLimiter` and `Limiter`; `ErrNoRedisClient`.
+
 ## v0.3.1
 
 ### Changed (behaviour)
