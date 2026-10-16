@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`github.com/dehwyy/ratelimitfx` — standalone Go library: a Redis-backed sliding-window rate limiter with one pluggable strategy. Single-module repo, not part of the `paylonium` Go workspace despite its location.
+`github.com/dehwyy/ratelimitfx` — standalone Go library: a Redis-backed rate limiter (sliding-window journal by default, optional GCRA behind `Config.Algorithm`) with one pluggable strategy. Single-module repo, not part of the `paylonium` Go workspace despite its location.
 
 `module.go` offers `Module[C](func(*C) Config)`: provides `*RedisLimiter` and `Limiter` from a `*redis.Client` or `redis.Cmdable` in the graph and an optional `Strategy` (default `PerKeyStrategy{}`).
 
@@ -43,9 +43,9 @@ The only built-in strategy is `PerKeyStrategy` (`Name()` returns `"key-strategy"
 
 `RedisLimiter` (limiter.go) is the only `Limiter` implementation, built via `NewRedisLimiter(client, strategy, cfg)`.
 
-`(*RedisLimiter).AllowNWithQuota(ctx, k, limit) (Quota, error)` (allow_n_with_quota.go) is **not** part of `Limiter`: fakes of `Limiter` in consumers (a dozen of them) must keep compiling. It returns the `AllowN` decision plus the window quota (`Quota` in quota.go: `Allowed`, `Limit`, `Remaining`, `ResetAt`, `RetryAfter`, `Known`) from one script call. Keep the field names free of ZSET vocabulary: a future GCRA implementation has to fill the same fields.
+`(*RedisLimiter).AllowNWithQuota(ctx, k, limit) (Quota, error)` (allow_n_with_quota.go) is **not** part of `Limiter`: fakes of `Limiter` in consumers (a dozen of them) must keep compiling. It returns the `AllowN` decision plus the window quota (`Quota` in quota.go: `Allowed`, `Limit`, `Remaining`, `ResetAt`, `RetryAfter`, `Known`) from one script call. The field names are free of ZSET vocabulary: both algorithms fill the same fields (GCRA semantics in the GCRA section).
 
-Redis key format is fixed: `<KeyPrefix>:<Strategy.Name()>:<Strategy.Key(k)>`. Changing it breaks keyspace for running deployments.
+The sliding-window (journal) Redis key format is fixed: `<KeyPrefix>:<Strategy.Name()>:<Strategy.Key(k)>`. Changing it breaks keyspace for running deployments. GCRA keys have their own namespace, `<KeyPrefix>:gcra:<Strategy.Name()>:<Strategy.Key(k)>` (a string, not a ZSET): sharing the journal key would give `WRONGTYPE`.
 
 ### Sliding window implementation
 
@@ -60,6 +60,20 @@ Single atomic Lua script per `Allow`/`AllowN` call (limiter.go `slidingWindowScr
 `AllowNWithQuota` runs a second script (`quotaWindowScript`, same ARGV, same four steps) that additionally returns `{allowed, count after the conditional ZADD, score of the oldest entry or -1}`. It writes to the same ZSET as `slidingWindowScript`, so old and new pods can share a window. The key, ARGV list and error handling are shared with `allow` through `windowKey`, `windowArgs` and `scriptFailed` (window.go): change them in one place only.
 
 The member format `<nanoUnix>-<atomic-seq>` (package-level `memberSeq`) guarantees uniqueness even when multiple goroutines hit the same nanosecond — required because ZADD dedupes by member.
+
+### GCRA (`Config.Algorithm`)
+
+`Algorithm` (algorithm.go): `AlgorithmSlidingWindow = "sliding"`, `AlgorithmGCRA = "gcra"` (the values of the gateways' `RATE_LIMIT_ALGORITHM` env), `String()`. Only the exact `AlgorithmGCRA` selects GCRA; the empty and unknown values mean the journal. `withDefaults` does not touch the field; env validation and the Warn on a bad value belong to the gateway. `Limiter` is not extended.
+
+`allow` and `AllowNWithQuota` branch right after the `limit <= 0` short-circuit into one private path, `gcra` (gcra.go); `Allow`/`AllowN` use its `Allowed`. `gcraScript` (its text is part of the contract once released) keeps the theoretical arrival time (TAT) as an integer string in microseconds (a Lua double is exact up to 2^53, unix microseconds are about 1.8e15; pass it to `SET` with `string.format('%.0f')`, never as a bare number):
+1. `tat = max(GET key, now)`, `I = max(floor(Window / limit), 1)` microseconds, burst `P = limit * I`.
+2. Allowed when `tat + I - now <= P`; then `SET key tat + I PX ceil((tat + I - now) / 1000)`.
+3. Rejected: no write; with `CountRejected` the TAT becomes `now + P`.
+4. The script returns integers `{allowed, remaining, reset_after, retry_after}` (microseconds); `gcraQuotaOf` turns them into `Quota` with `ResetAt = now + reset_after`.
+
+`RetryAfter` is `TAT' - (limit - 1) * I - now`, the exact time after which the same request passes; consumers must build `Retry-After` from it, not from `ResetAt - now` (after one request `ResetAt` is only about `now + I`). A change of `limit` between calls keeps the state; `Remaining` is clamped to `[0, limit]`. A reply of the wrong length and Redis errors go through `scriptFailed` (same message and log fields as the journal, `Config.FailMode`).
+
+A stream the journal admits in full is admitted in full by GCRA (tested), but after a denial the two diverge and GCRA can deny a request the journal would allow (limit 2, 60 s: requests at 0, 0, 30, 60, 60 s; tested), so the two are not interchangeable. Pods with different algorithms count in different keys (up to 2x the limit while a rollout lasts).
 
 ### Fail modes
 
@@ -94,6 +108,8 @@ The two payment gateways use it too, also fail closed, for the per-IP and per-me
 - payout-gateway-api: its own `NewRedisLimiter`, `CountRejected: false`, prefix `payout-gateway:ratelimit`.
 
 Both call `AllowN` and then query the window a second time to build `X-RateLimit-*` and `Retry-After`; `AllowNWithQuota` (v0.5.0) removes that second round trip. The switch is an env flag of each gateway (default off); the library has no flag.
+
+The algorithm is `Config.Algorithm`, set from the gateways' `RATE_LIMIT_ALGORITHM` env (`sliding` default, `gcra`); GCRA only together with `AllowNWithQuota`, since the old quota path reads the ZSET. The library has no flag for it either.
 
 ## Conventions enforced by the existing code
 

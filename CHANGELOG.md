@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.6.0
+
+### Added
+
+- `Config.Algorithm` (`Algorithm`): `AlgorithmSlidingWindow` (`"sliding"`) or `AlgorithmGCRA` (`"gcra"`),
+  with `String()`. The empty and any unknown value select the sliding window of v0.5.0; only the exact
+  `AlgorithmGCRA` selects GCRA. The default is unchanged.
+- GCRA: one O(1) script call per request (`GET` and at most one `SET`) instead of `ZREMRANGEBYSCORE`,
+  `ZCARD`, `ZADD` and `PEXPIRE`. The state is one string per key, the theoretical arrival time in
+  microseconds, so the memory per key no longer grows with the limit.
+- `Allow`, `AllowN` and `AllowNWithQuota` all follow `Config.Algorithm`; signatures and `Limiter` are unchanged.
+
+### GCRA semantics
+
+- Key: `<KeyPrefix>:gcra:<Strategy.Name()>:<Strategy.Key(k)>`. It lives next to the sliding-window ZSET
+  without a `WRONGTYPE` clash, and the two counts are independent.
+- Emission interval `I = floor(Window / limit)` (at least 1 microsecond), burst `limit`: up to `limit`
+  requests are allowed at once, then one per `I`. The rate error is below 0.1 % for `limit <= 60000` per minute.
+- `CountRejected = false`: a rejected request does not change the state. `true`: it sets the arrival
+  time to `now + limit * I`, so a hammering client stays blocked while it keeps sending and recovers
+  within `Window` after it stops.
+- `Quota`: `Remaining` is in `[0, limit]`; `ResetAt` is the moment the bucket is full again; `RetryAfter`
+  is `0` when allowed, otherwise the exact time after which the same request passes. After one request
+  `ResetAt` is about `now + I`, not `now + Window`.
+- `Retry-After` must be taken from `Quota.RetryAfter`, not from `ResetAt - now`.
+- Redis errors and malformed replies are logged and handled like in the sliding window (same message,
+  same fields, `Config.FailMode`).
+
+### Notes
+
+- GCRA is not a drop-in copy of the journal. A stream of requests that the journal admits in full is admitted in
+  full by GCRA, and the mean rate is the same, but once the journal has denied something the two diverge, and
+  GCRA can deny a request the journal would allow. Example with `limit = 2` and a 60 s window, requests at 0, 0,
+  30, 60, 60 s: the journal denies the one at 30 s, GCRA denies the last one at 60 s.
+- Pods with different `Algorithm` count in different keys: during a rolling update a client can get up to
+  twice its limit. Switching back to `sliding` starts with an empty window.
+- `slidingWindowScript` and `quotaWindowScript` are unchanged byte for byte: with the default algorithm
+  v0.6.0 and v0.5.0 behave identically.
+
 ## v0.5.0
 
 ### Added

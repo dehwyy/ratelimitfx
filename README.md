@@ -1,8 +1,9 @@
 # ratelimitfx
 
-Redis-backed sliding-window rate limiter with a pluggable strategy.
+Redis-backed rate limiter with a pluggable strategy.
 
 - Sliding window via Redis sorted sets, evaluated atomically by a single Lua script (one round trip, no races between concurrent callers).
+- Optional GCRA (`Config.Algorithm`): one string per key and O(1) work per request instead of a journal.
 - `Limiter` interface — small, mock-friendly, strategy-scoped Redis keys.
 - Built-in `PerKeyStrategy` keyed by any `fmt.Stringer` — bring your own strategy via the `Strategy` interface.
 - `FailMode` — `FailClosed` (default, deny on Redis error) or `FailOpen` (allow).
@@ -29,7 +30,8 @@ go get github.com/dehwyy/ratelimitfx@latest
 | `PerKeyStrategy` | struct | the only built-in strategy; default cap `120` |
 | `Key` | type alias | `= fmt.Stringer` — the caller-identity value |
 | `RPM` | microtype | `int32` with `.RPM() int32` |
-| `Config` | struct | `Window`, `MaxRequests`, `FailMode`, `KeyPrefix`, `CountRejected` |
+| `Config` | struct | `Window`, `MaxRequests`, `FailMode`, `KeyPrefix`, `CountRejected`, `Algorithm` |
+| `Algorithm` | string type | `AlgorithmSlidingWindow` (`"sliding"`, default), `AlgorithmGCRA` (`"gcra"`), `String()` |
 | `ClientIP(r, trusted ...netip.Prefix) string` | func | client IP; `X-Forwarded-For` / `X-Real-IP` are honoured only when `RemoteAddr` is a trusted proxy |
 | `ParseTrustedProxies([]string) ([]netip.Prefix, error)` | func | parses CIDRs and bare IPs |
 | `StringKey` | microtype | `string` implementing `fmt.Stringer`, ready to use as a `Key` |
@@ -140,6 +142,45 @@ The method uses the same key, member format, `CountRejected` handling and `FailM
 share one window and can be mixed. A Redis error is logged by the same code path as in `AllowN`; with
 `FailClosed` it is returned as an error, with `FailOpen` the request is allowed with `Known == false`.
 
+## GCRA
+
+`Config.Algorithm = ratelimit.AlgorithmGCRA` switches `Allow`, `AllowN` and `AllowNWithQuota` from the
+sliding-window journal to the Generic Cell Rate Algorithm. The empty and any unknown value keep the
+journal; only the exact `"gcra"` selects GCRA, so a gateway can pass its env value through after validating it.
+
+```go
+limiter := ratelimit.NewRedisLimiter(
+    client,
+    ratelimit.PerKeyStrategy{RPM: 1200},
+    ratelimit.Config{Algorithm: ratelimit.AlgorithmGCRA},
+)
+```
+
+- One `EVALSHA` per request, `GET` plus at most one `SET`. The state is a single string: the theoretical
+  arrival time (TAT) in microseconds. There is no journal to trim or count.
+- The interval between permits is `floor(Window / limit)` (at least 1 microsecond); the burst is `limit`.
+  An idle key allows `limit` requests at once, then one per interval.
+- Keys are `<KeyPrefix>:gcra:<Strategy.Name()>:<Strategy.Key(k)>`, a separate namespace: they never
+  collide with the ZSET keys of the journal, and the two counts are independent.
+- `CountRejected: false` leaves the state untouched on a rejection. `true` moves the TAT to
+  `now + limit * interval`, so a client that keeps hammering stays blocked and recovers within `Window`
+  after it stops.
+
+`Quota` under GCRA:
+
+| Field | Meaning |
+|-------|---------|
+| `Remaining` | `limit - ceil((TAT - now) / interval)`, clamped to `[0, limit]` |
+| `ResetAt` | the TAT after this request: when the bucket is full again. About `now + interval` after one request, not `now + Window` |
+| `RetryAfter` | `0` when allowed, otherwise the exact time after which the same request passes. Build `Retry-After` from it, not from `ResetAt - now` |
+
+GCRA is not a copy of the journal. A stream of requests that the journal admits in full is admitted in full
+by GCRA, and the mean rate is the same, but once the journal has denied something the two diverge, and GCRA
+can deny a request the journal would allow (`limit = 2`, 60 s window, requests at 0, 0, 30, 60, 60 s: the
+journal denies the one at 30 s, GCRA denies the last one at 60 s).
+Pods running different algorithms count in different keys, so during a rolling update a client can get
+up to twice its limit. Switching back starts with an empty window.
+
 ## Custom strategy
 
 ```go
@@ -164,7 +205,8 @@ The static cap comes from `Strategy.Limit()` (`PerKeyStrategy` default is `120`)
 requests-per-window. A cap of `<= 0` disables limiting and short-circuits without touching Redis.
 
 Redis keys are `<KeyPrefix>:<Strategy.Name()>:<Strategy.Key(k)>`, e.g.
-`ratelimitfx:key-strategy:550e8400-e29b-41d4-a716-446655440000`.
+`ratelimitfx:key-strategy:550e8400-e29b-41d4-a716-446655440000`. With `AlgorithmGCRA` the key is
+`<KeyPrefix>:gcra:<Strategy.Name()>:<Strategy.Key(k)>`.
 
 ## Counting rejected requests
 
@@ -204,7 +246,9 @@ per-merchant limits:
 - payout-gateway-api: its own `NewRedisLimiter`, `CountRejected: false`, key prefix `payout-gateway:ratelimit`.
 
 Both call `AllowN` per request; `AllowNWithQuota` (v0.5.0) is meant to replace their second Redis query
-for the rate-limit headers.
+for the rate-limit headers. Each gateway chooses the algorithm with its own `RATE_LIMIT_ALGORITHM` env
+(`sliding` by default, `gcra`); GCRA is used only together with `AllowNWithQuota`, and `Retry-After` comes from
+`Quota.RetryAfter`.
 
 ## Testing
 
