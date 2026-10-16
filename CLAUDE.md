@@ -43,17 +43,21 @@ The only built-in strategy is `PerKeyStrategy` (`Name()` returns `"key-strategy"
 
 `RedisLimiter` (limiter.go) is the only `Limiter` implementation, built via `NewRedisLimiter(client, strategy, cfg)`.
 
+`(*RedisLimiter).AllowNWithQuota(ctx, k, limit) (Quota, error)` (allow_n_with_quota.go) is **not** part of `Limiter`: fakes of `Limiter` in consumers (a dozen of them) must keep compiling. It returns the `AllowN` decision plus the window quota (`Quota` in quota.go: `Allowed`, `Limit`, `Remaining`, `ResetAt`, `RetryAfter`, `Known`) from one script call. Keep the field names free of ZSET vocabulary: a future GCRA implementation has to fill the same fields.
+
 Redis key format is fixed: `<KeyPrefix>:<Strategy.Name()>:<Strategy.Key(k)>`. Changing it breaks keyspace for running deployments.
 
 ### Sliding window implementation
 
-Single atomic Lua script per `Allow`/`AllowN` call (limiter.go `slidingWindowScript`, run via `redis.Script`):
+Single atomic Lua script per `Allow`/`AllowN` call (limiter.go `slidingWindowScript`, run via `redis.Script`; its text is part of the contract, never edit it — running instances have its SHA cached):
 1. `ZREMRANGEBYSCORE key 0 <now - window>` — drop expired entries.
 2. `ZCARD key` — `allowed = count < limit`.
 3. `ZADD key <nowMs> <member>` — only if allowed, or if `Config.CountRejected` is true.
 4. `PEXPIRE key <2*window>` — TTL safety net.
 
 `Config.CountRejected` (default false): rejected requests are not recorded, so a hammering client is not blocked forever. `true` restores the pre-v0.3.1 behaviour. The clock is `RedisLimiter.now` (defaults to `time.Now`, overridable in package tests).
+
+`AllowNWithQuota` runs a second script (`quotaWindowScript`, same ARGV, same four steps) that additionally returns `{allowed, count after the conditional ZADD, score of the oldest entry or -1}`. It writes to the same ZSET as `slidingWindowScript`, so old and new pods can share a window. The key, ARGV list and error handling are shared with `allow` through `windowKey`, `windowArgs` and `scriptFailed` (window.go): change them in one place only.
 
 The member format `<nanoUnix>-<atomic-seq>` (package-level `memberSeq`) guarantees uniqueness even when multiple goroutines hit the same nanosecond — required because ZADD dedupes by member.
 
@@ -64,6 +68,8 @@ The member format `<nanoUnix>-<atomic-seq>` (package-level `memberSeq`) guarante
 - `FailOpen`: log at Error level, return `(true, nil)` — caller lets request through.
 
 Script errors (including pipeline/connection errors) follow `FailMode`.
+
+`AllowNWithQuota` follows the same rules: `FailClosed` returns `Quota{Limit: limit}` and the error, `FailOpen` returns `Quota{Allowed: true, Limit: limit}` (`Known == false`).
 
 Short-circuit: `limit <= 0` returns `(true, nil)` without touching Redis. This is how callers disable limiting via config without special-casing it upstream.
 
@@ -83,7 +89,11 @@ Everything uses `miniredis.RunT(t)` — no Docker. When adding tests that rely o
 
 Redis-backed consumers (merchant-api, widgetapi, payin-processing) use this limiter and run fail closed.
 
-The two payment gateways (payin-gateway-api, payout-gateway-api) do **not** use this Redis limiter. They run an in-process `golang.org/x/time/rate` token bucket per merchant (their own `pkg/ratelimit`), which is **per-pod** — effective global cap is `N × rps` with `N` replicas. Those gateways fail closed on a per-merchant RPS lookup error (return `503`).
+The two payment gateways use it too, also fail closed, for the per-IP and per-merchant limits:
+- payin-gateway-api: `Module`, `CountRejected: true`, prefix `payin-gw:ratelimit`, 60 s window.
+- payout-gateway-api: its own `NewRedisLimiter`, `CountRejected: false`, prefix `payout-gateway:ratelimit`.
+
+Both call `AllowN` and then query the window a second time to build `X-RateLimit-*` and `Retry-After`; `AllowNWithQuota` (v0.5.0) removes that second round trip. The switch is an env flag of each gateway (default off); the library has no flag.
 
 ## Conventions enforced by the existing code
 

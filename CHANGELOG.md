@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.5.0
+
+### Added
+
+- `(*RedisLimiter).AllowNWithQuota(ctx, k, limit) (Quota, error)`: the same decision as `AllowN`
+  together with the window quota, returned by one Lua call (one round trip). Rate-limit response
+  headers no longer need a second Redis query (`ZCOUNT` + `ZRANGEBYSCORE`, or `ZCARD` + `ZRANGE`).
+- `Quota`: `Allowed`, `Limit`, `Remaining` (never negative), `ResetAt` (oldest entry + `Window`),
+  `RetryAfter` (zero when allowed, otherwise `ResetAt - now`), `Known` (false when there is no quota:
+  `limit <= 0`, or `FailOpen` after a Redis error).
+
+### Notes
+
+- `AllowNWithQuota` uses its own script but the same key, member format, `CountRejected` handling,
+  `PEXPIRE` and clock as `AllowN`; both methods share one window and can be mixed freely, also across
+  pods running different versions.
+- `Limiter` is unchanged: the method lives on `*RedisLimiter`, so existing fakes keep compiling.
+- Redis errors are logged by the same code path as `AllowN` (same message and fields) and follow
+  `Config.FailMode`.
+- Internal: key, member and script-failure handling of `Allow`/`AllowN` moved into shared private
+  helpers; their behaviour and the sliding-window script are unchanged.
+
 ## v0.4.0
 
 ### Security

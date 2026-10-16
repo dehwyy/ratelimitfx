@@ -22,6 +22,8 @@ go get github.com/dehwyy/ratelimitfx@latest
 |--------|------|-------|
 | `Limiter` | interface | `Allow(ctx, Key)` / `AllowN(ctx, Key, limit)` |
 | `RedisLimiter` | struct | the only `Limiter` implementation |
+| `(*RedisLimiter).AllowNWithQuota(ctx, Key, limit)` | method | `AllowN` plus the window quota from the same script call; not part of `Limiter` |
+| `Quota` | struct | `Allowed`, `Limit`, `Remaining`, `ResetAt`, `RetryAfter`, `Known` |
 | `NewRedisLimiter(client, strategy, cfg)` | ctor | non-generic |
 | `Strategy` | interface | `Name() string`, `Key(fmt.Stringer) string`, `Limit() RPM` |
 | `PerKeyStrategy` | struct | the only built-in strategy; default cap `120` |
@@ -105,6 +107,39 @@ rpm, _ := configCache.Get(ctx, merchantID) // varies per merchant
 allowed, err := limiter.AllowN(ctx, merchantID, rpm)
 ```
 
+## Quota for response headers
+
+`AllowNWithQuota` takes the same decision as `AllowN` and returns the state of the window from the same
+Lua call, so `X-RateLimit-*` and `Retry-After` need no second Redis round trip. It is a method of
+`*RedisLimiter`, not of the `Limiter` interface.
+
+```go
+quota, err := limiter.AllowNWithQuota(ctx, merchantID, rpm)
+if err != nil {
+    return err
+}
+if quota.Known {
+    w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(int(quota.Remaining)))
+    w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(quota.ResetAt.Unix(), 10))
+}
+if !quota.Allowed {
+    w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(quota.RetryAfter.Seconds()))))
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `Allowed` | the decision, identical to `AllowN` |
+| `Limit` | the `limit` argument |
+| `Remaining` | `max(limit - entries in the window, 0)`, counted after this request was recorded |
+| `ResetAt` | when the nearest slot frees: oldest entry in the window plus `Window` |
+| `RetryAfter` | `0` when allowed, otherwise `ResetAt - now` |
+| `Known` | `false` when there is no quota: `limit <= 0` (Redis is not touched) or `FailOpen` after a Redis error |
+
+The method uses the same key, member format, `CountRejected` handling and `FailMode` as `AllowN`; the two
+share one window and can be mixed. A Redis error is logged by the same code path as in `AllowN`; with
+`FailClosed` it is returned as an error, with `FailOpen` the request is allowed with `Known == false`.
+
 ## Custom strategy
 
 ```go
@@ -162,10 +197,14 @@ caller lets the request through.
 Redis-backed consumers (merchant-api, widgetapi, payin-processing) use this library and run fail
 closed: when Redis is unreachable they deny the request.
 
-The two payment gateways (payin-gateway-api, payout-gateway-api) do **not** use this Redis limiter.
-They run an in-process `golang.org/x/time/rate` token bucket per merchant (see each service's
-`pkg/ratelimit`). That limiter is **per-pod**: with `N` replicas the effective global cap is
-`N × rps`. On a per-merchant RPS lookup error those gateways also fail closed (return `503`).
+The two payment gateways use the same library, also fail closed, and share it between the per-IP and
+per-merchant limits:
+
+- payin-gateway-api: `Module`, `CountRejected: true`, key prefix `payin-gw:ratelimit`, 60 s window.
+- payout-gateway-api: its own `NewRedisLimiter`, `CountRejected: false`, key prefix `payout-gateway:ratelimit`.
+
+Both call `AllowN` per request; `AllowNWithQuota` (v0.5.0) is meant to replace their second Redis query
+for the rate-limit headers.
 
 ## Testing
 
