@@ -25,6 +25,7 @@ type Config struct {
 	// CountRejected makes rejected requests count towards the window, so a client that keeps
 	// hammering stays blocked. Default false: only allowed requests are recorded.
 	CountRejected bool
+	Algorithm     Algorithm
 }
 
 const (

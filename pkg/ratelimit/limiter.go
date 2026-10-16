@@ -68,7 +68,11 @@ func (l *RedisLimiter) Allow(
 	ctx context.Context,
 	k Key,
 ) (bool, error) {
-	return l.allow(ctx, k, l.strategy.Limit().RPM())
+	return l.allow(
+		ctx,
+		k,
+		l.strategy.Limit().RPM(),
+	)
 }
 
 // AllowN reports whether k is below the given per-request limit within the current sliding window.
@@ -80,7 +84,11 @@ func (l *RedisLimiter) AllowN(
 	k Key,
 	limit int32,
 ) (bool, error) {
-	return l.allow(ctx, k, limit)
+	return l.allow(
+		ctx,
+		k,
+		limit,
+	)
 }
 
 func (l *RedisLimiter) allow(
@@ -90,6 +98,15 @@ func (l *RedisLimiter) allow(
 ) (bool, error) {
 	if limit <= 0 {
 		return true, nil
+	}
+
+	if l.cfg.Algorithm == AlgorithmGCRA {
+		quota, err := l.gcra(
+			ctx,
+			k,
+			limit,
+		)
+		return quota.Allowed, err
 	}
 
 	key := l.windowKey(k)

@@ -52,6 +52,14 @@ func (l *RedisLimiter) AllowNWithQuota(
 		}, nil
 	}
 
+	if l.cfg.Algorithm == AlgorithmGCRA {
+		return l.gcra(
+			ctx,
+			k,
+			limit,
+		)
+	}
+
 	key := l.windowKey(k)
 	now := l.now()
 
