@@ -2,12 +2,9 @@ package ratelimit
 
 import (
 	"context"
-	"fmt"
-	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"github.com/rs/zerolog/log"
 )
 
 var memberSeq uint64
@@ -95,47 +92,23 @@ func (l *RedisLimiter) allow(
 		return true, nil
 	}
 
-	key := fmt.Sprintf(
-		"%s:%s:%s",
-		l.cfg.KeyPrefix,
-		l.strategy.Name(),
-		l.strategy.Key(k),
-	)
-
+	key := l.windowKey(k)
 	now := l.now()
-	member := fmt.Sprintf(
-		"%d-%d",
-		now.UnixNano(),
-		atomic.AddUint64(&memberSeq, 1),
-	)
-
-	countRejected := 0
-	if l.cfg.CountRejected {
-		countRejected = 1
-	}
 
 	result, err := slidingWindowScript.Run(
 		ctx,
 		l.client,
 		[]string{key},
-		now.UnixMilli(),
-		l.cfg.Window.Milliseconds(),
-		limit,
-		member,
-		(l.cfg.Window * 2).Milliseconds(),
-		countRejected,
+		l.windowArgs(
+			now,
+			limit,
+		)...,
 	).Int64()
 	if err != nil {
-		log.Error().
-			Err(err).
-			Str("ratelimit_strategy", l.strategy.Name()).
-			Str("ratelimit_key", key).
-			Str("ratelimit_fail_mode", failModeString(l.cfg.FailMode)).
-			Msg("ratelimitfx: redis script failed")
-		if l.cfg.FailMode == FailOpen {
-			return true, nil
-		}
-		return false, fmt.Errorf("ratelimitfx: redis script: %w", err)
+		return l.scriptFailed(
+			err,
+			key,
+		)
 	}
 
 	return result == 1, nil
